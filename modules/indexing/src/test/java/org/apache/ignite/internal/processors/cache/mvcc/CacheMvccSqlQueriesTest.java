@@ -24,12 +24,16 @@ import java.util.List;
 import java.util.Map;
 import java.util.Set;
 import java.util.concurrent.ThreadLocalRandom;
+import java.util.concurrent.atomic.AtomicBoolean;
+import javax.cache.processor.MutableEntry;
 import org.apache.ignite.Ignite;
 import org.apache.ignite.IgniteCache;
+import org.apache.ignite.cache.CacheEntryProcessor;
 import org.apache.ignite.cache.query.SqlFieldsQuery;
 import org.apache.ignite.cache.query.SqlQuery;
 import org.apache.ignite.cache.query.annotations.QuerySqlField;
 import org.apache.ignite.configuration.CacheConfiguration;
+import org.apache.ignite.internal.util.lang.GridInClosure3;
 import org.apache.ignite.internal.util.typedef.internal.S;
 import org.apache.ignite.lang.IgniteInClosure;
 
@@ -38,8 +42,8 @@ import static org.apache.ignite.cache.CacheWriteSynchronizationMode.FULL_SYNC;
 
 /**
  * TODO IGNITE-3478: text/spatial indexes with mvcc.
+ * TODO IGNITE-3478: indexingSpi with mvcc.
  * TODO IGNITE-3478: dynamic index create.
- * TODO IGNITE-3478: tests with/without inline.
  */
 @SuppressWarnings("unchecked")
 public class CacheMvccSqlQueriesTest extends CacheMvccAbstractTest {
@@ -47,56 +51,217 @@ public class CacheMvccSqlQueriesTest extends CacheMvccAbstractTest {
      * @throws Exception If failed.
      */
     public void testAccountsTxSql_SingleNode_SinglePartition() throws Exception {
-        accountsTxReadAll(1, 0, 0, 1, new IgniteInClosure<CacheConfiguration>() {
-            @Override public void apply(CacheConfiguration ccfg) {
-                ccfg.setIndexedTypes(Integer.class, MvccTestAccount.class).setSqlIndexMaxInlineSize(0);
-            }
-        }, false, ReadMode.SQL_ALL);
+        accountsTxReadAll(1, 0, 0, 1, new InitIndexing(Integer.class, MvccTestAccount.class), false, ReadMode.SQL_ALL);
     }
 
     /**
      * @throws Exception If failed.
      */
     public void testAccountsTxSql_WithRemoves_SingleNode_SinglePartition() throws Exception {
-        accountsTxReadAll(1, 0, 0, 1, new IgniteInClosure<CacheConfiguration>() {
-            @Override public void apply(CacheConfiguration ccfg) {
-                ccfg.setIndexedTypes(Integer.class, MvccTestAccount.class).setSqlIndexMaxInlineSize(0);
-            }
-        }, true, ReadMode.SQL_ALL);
+        accountsTxReadAll(1, 0, 0, 1, new InitIndexing(Integer.class, MvccTestAccount.class), true, ReadMode.SQL_ALL);
     }
 
     /**
      * @throws Exception If failed.
      */
     public void testAccountsTxSql_SingleNode() throws Exception {
-        accountsTxReadAll(1, 0, 0, 64, new IgniteInClosure<CacheConfiguration>() {
-            @Override public void apply(CacheConfiguration ccfg) {
-                ccfg.setIndexedTypes(Integer.class, MvccTestAccount.class).setSqlIndexMaxInlineSize(0);
-            }
-        }, false, ReadMode.SQL_ALL);
+        accountsTxReadAll(1, 0, 0, 64, new InitIndexing(Integer.class, MvccTestAccount.class), false, ReadMode.SQL_ALL);
     }
 
     /**
      * @throws Exception If failed.
      */
     public void testAccountsTxSql_WithRemoves_SingleNode() throws Exception {
-        accountsTxReadAll(1, 0, 0, 64, new IgniteInClosure<CacheConfiguration>() {
-            @Override public void apply(CacheConfiguration ccfg) {
-                ccfg.setIndexedTypes(Integer.class, MvccTestAccount.class).setSqlIndexMaxInlineSize(0);
+        accountsTxReadAll(1, 0, 0, 64, new InitIndexing(Integer.class, MvccTestAccount.class), true, ReadMode.SQL_ALL);
+    }
+
+    /**
+     * @throws Exception If failed.
+     */
+    public void testUpdateSingleValue() throws Exception {
+        final int VALS = 100;
+
+        final int writers = 4;
+
+        final int readers = 4;
+
+        final int INC_BY = 110;
+
+        final IgniteInClosure<IgniteCache<Object, Object>> init = new IgniteInClosure<IgniteCache<Object, Object>>() {
+            @Override public void apply(IgniteCache<Object, Object> cache) {
+                Map<Integer, MvccTestSqlIndexValue> vals = new HashMap<>();
+
+                for (int i = 0; i < VALS; i++)
+                    vals.put(i, new MvccTestSqlIndexValue(i));
+
+                cache.putAll(vals);
             }
-        }, true, ReadMode.SQL_ALL);
+        };
+
+        GridInClosure3<Integer, List<TestCache>, AtomicBoolean> writer =
+                new GridInClosure3<Integer, List<TestCache>, AtomicBoolean>() {
+                    @Override public void apply(Integer idx, List<TestCache> caches, AtomicBoolean stop) {
+                        ThreadLocalRandom rnd = ThreadLocalRandom.current();
+
+                        int cnt = 0;
+
+                        while (!stop.get()) {
+                            TestCache<Integer, MvccTestSqlIndexValue> cache = randomCache(caches, rnd);
+
+                            try {
+                                Integer key = rnd.nextInt(VALS);
+
+                                cache.cache.invoke(key, new CacheEntryProcessor<Integer, MvccTestSqlIndexValue, Object>() {
+                                    @Override public Object process(MutableEntry<Integer, MvccTestSqlIndexValue> e, Object... args) {
+                                        Integer key = e.getKey();
+
+                                        MvccTestSqlIndexValue val = e.getValue();
+
+                                        int newIdxVal;
+
+                                        if (val.idxVal1 < INC_BY) {
+                                            assertEquals(key.intValue(), val.idxVal1);
+
+                                            newIdxVal = val.idxVal1 + INC_BY;
+                                        }
+                                        else {
+                                            assertEquals(INC_BY + key, val.idxVal1);
+
+                                            newIdxVal = key;
+                                        }
+
+                                        e.setValue(new MvccTestSqlIndexValue(newIdxVal));
+
+                                        return null;
+                                    }
+                                });
+                            }
+                            finally {
+                                cache.readUnlock();
+                            }
+                        }
+
+                        info("Writer finished, updates: " + cnt);
+                    }
+                };
+
+        GridInClosure3<Integer, List<TestCache>, AtomicBoolean> reader =
+                new GridInClosure3<Integer, List<TestCache>, AtomicBoolean>() {
+                    @Override public void apply(Integer idx, List<TestCache> caches, AtomicBoolean stop) {
+                        ThreadLocalRandom rnd = ThreadLocalRandom.current();
+
+                        SqlFieldsQuery[] qrys = new SqlFieldsQuery[3];
+
+                        qrys[0] = new SqlFieldsQuery(
+                                "select _key, idxVal1 from MvccTestSqlIndexValue where idxVal1=?");
+
+                        qrys[1] = new SqlFieldsQuery(
+                                "select _key, idxVal1 from MvccTestSqlIndexValue where idxVal1=? or idxVal1=?");
+
+                        qrys[2] = new SqlFieldsQuery(
+                                "select _key, idxVal1 from MvccTestSqlIndexValue where _key=?");
+
+                        while (!stop.get()) {
+                            Integer key = rnd.nextInt(VALS);
+
+                            int qryIdx = rnd.nextInt(3);
+
+                            TestCache<Integer, MvccTestSqlIndexValue> cache = randomCache(caches, rnd);
+
+                            List<List<?>> res;
+
+                            try {
+                                SqlFieldsQuery qry = qrys[qryIdx];
+
+                                if (qryIdx == 1)
+                                    qry.setArgs(key, key + INC_BY);
+                                else
+                                    qry.setArgs(key);
+
+                                res = cache.cache.query(qry).getAll();
+                            }
+                            finally {
+                                cache.readUnlock();
+                            }
+
+                            assertTrue(qryIdx == 0 || !res.isEmpty());
+
+                            if (!res.isEmpty()) {
+                                assertEquals(1, res.size());
+
+                                List<?> resVals = res.get(0);
+
+                                Integer key0 = (Integer)resVals.get(0);
+                                Integer val0 = (Integer)resVals.get(1);
+
+                                assertEquals(key, key0);
+                                assertTrue(val0.equals(key) || val0.equals(key + INC_BY));
+                            }
+                        }
+
+                        if (idx == 0) {
+                            SqlFieldsQuery qry = new SqlFieldsQuery("select _key, idxVal1 from MvccTestSqlIndexValue");
+
+                            TestCache<Integer, MvccTestSqlIndexValue> cache = randomCache(caches, rnd);
+
+                            List<List<?>> res;
+
+                            try {
+                                res = cache.cache.query(qry).getAll();
+                            }
+                            finally {
+                                cache.readUnlock();
+                            }
+
+                            assertEquals(VALS, res.size());
+
+                            for (List<?> vals : res)
+                                info("Value: " + vals);
+                        }
+                    }
+                };
+
+        readWriteTest(
+            null,
+            1,
+            0,
+            0,
+            32,
+            writers,
+            readers,
+            DFLT_TEST_TIME,
+            new InitIndexing(Integer.class, MvccTestSqlIndexValue.class),
+            init,
+            writer,
+            reader);
     }
 
     /**
      * @throws Exception If failed.
      */
     public void testSqlSimple() throws Exception {
-        Ignite srv0 = startGrid(0);
+        startGrid(0);
+
+        for (int i = 0; i < 4; i++)
+            sqlSimple(i * 512);
+
+        ThreadLocalRandom rnd = ThreadLocalRandom.current();
+
+        for (int i = 0; i < 5; i++)
+            sqlSimple(rnd.nextInt(2048));
+    }
+
+    /**
+     * @param inlineSize Inline size.
+     * @throws Exception If failed.
+     */
+    private void sqlSimple(int inlineSize) throws Exception {
+        Ignite srv0 = ignite(0);
 
         IgniteCache<Integer, MvccTestSqlIndexValue> cache =  (IgniteCache)srv0.createCache(
             cacheConfiguration(PARTITIONED, FULL_SYNC, 0, DFLT_PARTITION_COUNT).
                 setIndexedTypes(Integer.class, MvccTestSqlIndexValue.class).
-                setSqlIndexMaxInlineSize(0));
+                setSqlIndexMaxInlineSize(inlineSize));
 
         Map<Integer, Integer> expVals = new HashMap<>();
 
@@ -134,18 +299,35 @@ public class CacheMvccSqlQueriesTest extends CacheMvccAbstractTest {
         checkValues(expVals, cache);
 
         checkActiveQueriesCleanup(srv0);
+
+        srv0.destroyCache(cache.getName());
     }
 
     /**
      * @throws Exception If failed.
      */
     public void testSqlSimplePutRemoveRandom() throws Exception {
-        Ignite srv0 = startGrid(0);
+        startGrid(0);
+
+        testSqlSimplePutRemoveRandom(0);
+
+        ThreadLocalRandom rnd = ThreadLocalRandom.current();
+
+        for (int i = 0; i < 3; i++)
+            testSqlSimplePutRemoveRandom(rnd.nextInt(2048));
+    }
+
+    /**
+     * @param inlineSize Inline size.
+     * @throws Exception If failed.
+     */
+    private void testSqlSimplePutRemoveRandom(int inlineSize) throws Exception {
+        Ignite srv0 = grid(0);
 
         IgniteCache<Integer, MvccTestSqlIndexValue> cache = (IgniteCache) srv0.createCache(
             cacheConfiguration(PARTITIONED, FULL_SYNC, 0, DFLT_PARTITION_COUNT).
                 setIndexedTypes(Integer.class, MvccTestSqlIndexValue.class).
-                setSqlIndexMaxInlineSize(0));
+                setSqlIndexMaxInlineSize(inlineSize));
 
         Map<Integer, Integer> expVals = new HashMap<>();
 
@@ -154,7 +336,7 @@ public class CacheMvccSqlQueriesTest extends CacheMvccAbstractTest {
 
         ThreadLocalRandom rnd = ThreadLocalRandom.current();
 
-        long stopTime = System.currentTimeMillis() + 10_000;
+        long stopTime = System.currentTimeMillis() + 5_000;
 
         for (int i = 0; i < 100_000; i++) {
             Integer key = rnd.nextInt(KEYS);
@@ -187,6 +369,8 @@ public class CacheMvccSqlQueriesTest extends CacheMvccAbstractTest {
         }
 
         checkActiveQueriesCleanup(srv0);
+
+        srv0.destroyCache(cache.getName());
     }
 
     /**
@@ -210,6 +394,12 @@ public class CacheMvccSqlQueriesTest extends CacheMvccAbstractTest {
      * @param cache Cache.
      */
     private void checkValues(Map<Integer, Integer> expVals, IgniteCache<Integer, MvccTestSqlIndexValue> cache) {
+        SqlFieldsQuery cntQry = new SqlFieldsQuery("select count(*) from MvccTestSqlIndexValue");
+
+        Long cnt = (Long)cache.query(cntQry).getAll().get(0).get(0);
+
+        assertEquals((long)expVals.size(), (Object)cnt);
+
         SqlQuery<Integer, MvccTestSqlIndexValue> qry;
 
         qry = new SqlQuery<>(MvccTestSqlIndexValue.class, "true");
@@ -307,6 +497,26 @@ public class CacheMvccSqlQueriesTest extends CacheMvccAbstractTest {
         /** {@inheritDoc} */
         @Override public String toString() {
             return S.toString(MvccTestSqlIndexValue.class, this);
+        }
+    }
+
+    /**
+     *
+     */
+    static class InitIndexing implements IgniteInClosure<CacheConfiguration> {
+        /** */
+        private final Class[] idxTypes;
+
+        /**
+         * @param idxTypes Indexed types.
+         */
+        InitIndexing(Class<?>... idxTypes) {
+            this.idxTypes = idxTypes;
+        }
+
+        /** {@inheritDoc} */
+        @Override public void apply(CacheConfiguration cfg) {
+            cfg.setIndexedTypes(idxTypes);
         }
     }
 }

@@ -457,7 +457,7 @@ public class GridH2Table extends TableBase {
      */
     @SuppressWarnings("LockAcquiredButNotSafelyReleased")
     private boolean doUpdate(final GridH2Row row, boolean del) throws IgniteCheckedException {
-        assert !cctx.mvccEnabled() || row.mvccCounter() != CacheCoordinatorsProcessor.COUNTER_NA : row;
+        assert !cctx.mvccEnabled() || row.mvccCounter() != CacheCoordinatorsProcessor.MVCC_COUNTER_NA : row;
         // Here we assume that each key can't be updated concurrently and case when different indexes
         // getting updated from different threads with different rows with the same key is impossible.
         lock(false);
@@ -479,6 +479,9 @@ public class GridH2Table extends TableBase {
                     assert replaced == (row.newMvccCoordinatorVersion() != 0);
 
                     old = null;
+
+                    if (!replaced)
+                        size.increment();
                 }
                 else {
                     old = pk.put(row);

@@ -26,8 +26,6 @@ import org.apache.ignite.internal.processors.query.h2.database.H2Tree;
 import org.apache.ignite.internal.processors.query.h2.opt.GridH2Row;
 import org.apache.ignite.internal.processors.query.h2.opt.GridH2SearchRow;
 
-import static org.apache.ignite.internal.processors.cache.mvcc.CacheCoordinatorsProcessor.assertMvccVersionValid;
-
 /**
  * Inner page for H2 row references.
  */
@@ -50,31 +48,7 @@ public abstract class AbstractH2InnerIO extends BPlusInnerIO<GridH2SearchRow> im
     @Override public void storeByOffset(long pageAddr, int off, GridH2SearchRow row) {
         GridH2Row row0 = (GridH2Row)row;
 
-        assert row0.link() != 0;
-
-        PageUtils.putLong(pageAddr, off, row0.link());
-
-        if (storeMvccInfo()) {
-            long mvccCrdVer = row.mvccCoordinatorVersion();
-            long mvccCntr = row.mvccCounter();
-
-            assert assertMvccVersionValid(mvccCrdVer, mvccCntr);
-
-            PageUtils.putLong(pageAddr, off + 8, mvccCrdVer);
-            PageUtils.putLong(pageAddr, off + 16, mvccCntr);
-
-            long newMvccCrdVer = row0.newMvccCoordinatorVersion();
-
-            PageUtils.putLong(pageAddr, off + 24, newMvccCrdVer);
-
-            if (newMvccCrdVer != 0) {
-                long newMvccCntr = row0.newMvccCounter();
-
-                assert assertMvccVersionValid(newMvccCrdVer, newMvccCntr);
-
-                PageUtils.putLong(pageAddr, off + 32, newMvccCntr);
-            }
-        }
+        H2IOUtils.storeRow(row0, pageAddr, off, storeMvccInfo());
     }
 
     /** {@inheritDoc} */
@@ -94,35 +68,7 @@ public abstract class AbstractH2InnerIO extends BPlusInnerIO<GridH2SearchRow> im
 
     /** {@inheritDoc} */
     @Override public void store(long dstPageAddr, int dstIdx, BPlusIO<GridH2SearchRow> srcIo, long srcPageAddr, int srcIdx) {
-        H2RowLinkIO rowIo = (H2RowLinkIO)srcIo;
-
-        long link = rowIo.getLink(srcPageAddr, srcIdx);
-
-        int off = offset(dstIdx);
-
-        PageUtils.putLong(dstPageAddr, off, link);
-
-        if (storeMvccInfo()) {
-            long mvccCrdVer = rowIo.getMvccCoordinatorVersion(srcPageAddr, srcIdx);
-            long mvccCntr = rowIo.getMvccCounter(srcPageAddr, srcIdx);
-
-            assert assertMvccVersionValid(mvccCrdVer, mvccCntr);
-
-            PageUtils.putLong(dstPageAddr, off + 8, mvccCrdVer);
-            PageUtils.putLong(dstPageAddr, off + 16, mvccCntr);
-
-            long newMvccCrdVer = rowIo.getNewMvccCoordinatorVersion(srcPageAddr, srcIdx);
-
-            PageUtils.putLong(dstPageAddr, off + 24, newMvccCrdVer);
-
-            if (newMvccCrdVer != 0) {
-                long newMvccCntr = rowIo.getNewMvccCounter(srcPageAddr, srcIdx);
-
-                assertMvccVersionValid(newMvccCrdVer, newMvccCntr);
-
-                PageUtils.putLong(dstPageAddr, off + 32, newMvccCntr);
-            }
-        }
+        H2IOUtils.store(dstPageAddr, offset(dstIdx), srcIo, srcPageAddr, srcIdx, storeMvccInfo());
     }
 
     /** {@inheritDoc} */

@@ -107,13 +107,11 @@ public abstract class GridH2Row extends GridH2SearchRowAdapter implements CacheD
         return false;
     }
 
-    /** {@inheritDoc} */
     public long newMvccCoordinatorVersion() {
         return 0;
     }
 
-    /** {@inheritDoc} */
     public long newMvccCounter() {
-        return CacheCoordinatorsProcessor.COUNTER_NA;
+        return CacheCoordinatorsProcessor.MVCC_COUNTER_NA;
     }
 }

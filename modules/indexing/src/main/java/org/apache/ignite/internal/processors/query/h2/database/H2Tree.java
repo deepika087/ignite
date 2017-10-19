@@ -29,6 +29,7 @@ import org.apache.ignite.internal.processors.cache.persistence.tree.io.BPlusMeta
 import org.apache.ignite.internal.processors.cache.persistence.tree.reuse.ReuseList;
 import org.apache.ignite.internal.processors.query.h2.database.io.H2ExtrasInnerIO;
 import org.apache.ignite.internal.processors.query.h2.database.io.H2ExtrasLeafIO;
+import org.apache.ignite.internal.processors.query.h2.database.io.H2RowLinkIO;
 import org.apache.ignite.internal.processors.query.h2.opt.GridH2Row;
 import org.apache.ignite.internal.processors.query.h2.opt.GridH2SearchRow;
 import org.apache.ignite.internal.util.typedef.internal.S;
@@ -37,7 +38,7 @@ import org.h2.result.SearchRow;
 import org.h2.table.IndexColumn;
 import org.h2.value.Value;
 
-import static org.apache.ignite.internal.processors.cache.mvcc.CacheCoordinatorsProcessor.COUNTER_NA;
+import static org.apache.ignite.internal.processors.cache.mvcc.CacheCoordinatorsProcessor.MVCC_COUNTER_NA;
 import static org.apache.ignite.internal.processors.cache.mvcc.CacheCoordinatorsProcessor.assertMvccVersionValid;
 import static org.apache.ignite.internal.processors.cache.mvcc.CacheCoordinatorsProcessor.unmaskCoordinatorVersion;
 
@@ -206,7 +207,7 @@ public abstract class H2Tree extends BPlusTree<GridH2SearchRow, GridH2Row> {
             }
 
             if (lastIdxUsed == cols.length)
-                return 0;
+                return mvccCompare((H2RowLinkIO)io, pageAddr, idx, row);
 
             SearchRow rowData = getRow(io, pageAddr, idx);
 
@@ -218,7 +219,7 @@ public abstract class H2Tree extends BPlusTree<GridH2SearchRow, GridH2Row> {
 
                 if (v2 == null) {
                     // Can't compare further.
-                    return 0;
+                    return mvccCompare((H2RowLinkIO)io, pageAddr, idx, row);
                 }
 
                 Value v1 = rowData.getValue(idx0);
@@ -229,7 +230,7 @@ public abstract class H2Tree extends BPlusTree<GridH2SearchRow, GridH2Row> {
                     return InlineIndexHelper.fixSort(c, col.sortType);
             }
 
-            return 0;
+            return mvccCompare((H2RowLinkIO)io, pageAddr, idx, row);
         }
     }
 
@@ -266,6 +267,37 @@ public abstract class H2Tree extends BPlusTree<GridH2SearchRow, GridH2Row> {
         return mvccCompare(r1, r2);
     }
 
+    private int mvccCompare(H2RowLinkIO io, long pageAddr, int idx, GridH2SearchRow r2) {
+        int c = 0;
+
+        if (mvccEnabled && !r2.indexSearchRow()) {
+            long crdVer1 = io.getMvccCoordinatorVersion(pageAddr, idx);
+            long crdVer2 = r2.mvccCoordinatorVersion();
+
+            assert crdVer1 != 0;
+            assert crdVer2 != 0 : r2;
+
+            c = Long.compare(unmaskCoordinatorVersion(crdVer1), unmaskCoordinatorVersion(crdVer2));
+
+            if (c != 0)
+                return c;
+
+            long cntr = io.getMvccCounter(pageAddr, idx);
+
+            assert cntr != MVCC_COUNTER_NA;
+            assert r2.mvccCounter() != MVCC_COUNTER_NA : r2;
+
+            c = Long.compare(cntr, r2.mvccCounter());
+        }
+
+        return c;
+    }
+
+    /**
+     * @param r1 First row.
+     * @param r2 Second row.
+     * @return Comparison result.
+     */
     private int mvccCompare(GridH2Row r1, GridH2SearchRow r2) {
         if (mvccEnabled && !r2.indexSearchRow()) {
             long crdVer1 = r1.mvccCoordinatorVersion();
@@ -279,8 +311,8 @@ public abstract class H2Tree extends BPlusTree<GridH2SearchRow, GridH2Row> {
             if (c != 0)
                 return c;
 
-            assert r1.mvccCounter() != COUNTER_NA : r1;
-            assert r2.mvccCounter() != COUNTER_NA : r2;
+            assert r1.mvccCounter() != MVCC_COUNTER_NA : r1;
+            assert r2.mvccCounter() != MVCC_COUNTER_NA : r2;
 
             c = Long.compare(r1.mvccCounter(), r2.mvccCounter());
 
