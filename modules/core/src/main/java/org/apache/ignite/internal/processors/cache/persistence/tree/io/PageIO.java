@@ -104,6 +104,12 @@ public abstract class PageIO {
     private static List<IOVersions<? extends BPlusLeafIO<?>>> h2ExtraLeafIOs = new ArrayList<>(MAX_PAYLOAD_SIZE);
 
     /** */
+    private static List<IOVersions<? extends BPlusInnerIO<?>>> h2ExtraMvccInnerIOs = new ArrayList<>(MAX_PAYLOAD_SIZE);
+
+    /** */
+    private static List<IOVersions<? extends BPlusLeafIO<?>>> h2ExtraMvccLeafIOs = new ArrayList<>(MAX_PAYLOAD_SIZE);
+
+    /** */
     public static final int TYPE_OFF = 0;
 
     /** */
@@ -190,16 +196,28 @@ public abstract class PageIO {
     public static final short T_PART_CNTRS = 20;
 
     /** Index for payload == 1. */
-    public static final short T_H2_EX_REF_LEAF_START = 10000;
+    public static final short T_H2_EX_REF_LEAF_START = 10_000;
 
     /** */
     public static final short T_H2_EX_REF_LEAF_END = T_H2_EX_REF_LEAF_START + MAX_PAYLOAD_SIZE - 1;
 
     /** */
-    public static final short T_H2_EX_REF_INNER_START = 20000;
+    public static final short T_H2_EX_REF_INNER_START = 20_000;
 
     /** */
     public static final short T_H2_EX_REF_INNER_END = T_H2_EX_REF_INNER_START + MAX_PAYLOAD_SIZE - 1;
+
+    /** */
+    public static final short T_H2_EX_REF_MVCC_LEAF_START = 23_000;
+
+    /** */
+    public static final short T_H2_EX_REF_MVCC_LEAF_END = T_H2_EX_REF_MVCC_LEAF_START + MAX_PAYLOAD_SIZE - 1;
+
+    /** */
+    public static final short T_H2_EX_REF_MVCC_INNER_START = 26_000;
+
+    /** */
+    public static final short T_H2_EX_REF_MVCC_INNER_END = T_H2_EX_REF_MVCC_INNER_START + MAX_PAYLOAD_SIZE - 1;
 
     /** */
     public static final short T_DATA_REF_MVCC_INNER = 21;
@@ -366,8 +384,10 @@ public abstract class PageIO {
      *
      * @param innerExtIOs Extra versions.
      */
-    public static void registerH2ExtraInner(IOVersions<? extends BPlusInnerIO<?>> innerExtIOs) {
-        h2ExtraInnerIOs.add(innerExtIOs);
+    public static void registerH2ExtraInner(IOVersions<? extends BPlusInnerIO<?>> innerExtIOs, boolean mvcc) {
+        List<IOVersions<? extends BPlusInnerIO<?>>> ios = mvcc ? h2ExtraMvccInnerIOs : h2ExtraInnerIOs;
+
+        ios.add(innerExtIOs);
     }
 
     /**
@@ -375,24 +395,30 @@ public abstract class PageIO {
      *
      * @param leafExtIOs Extra versions.
      */
-    public static void registerH2ExtraLeaf(IOVersions<? extends BPlusLeafIO<?>> leafExtIOs) {
-        h2ExtraLeafIOs.add(leafExtIOs);
+    public static void registerH2ExtraLeaf(IOVersions<? extends BPlusLeafIO<?>> leafExtIOs, boolean mvcc) {
+        List<IOVersions<? extends BPlusLeafIO<?>>> ios = mvcc ? h2ExtraMvccLeafIOs : h2ExtraLeafIOs;
+
+        ios.add(leafExtIOs);
     }
 
     /**
      * @param idx Index.
      * @return IOVersions for given idx.
      */
-    public static IOVersions<? extends BPlusInnerIO<?>> getInnerVersions(int idx) {
-        return h2ExtraInnerIOs.get(idx);
+    public static IOVersions<? extends BPlusInnerIO<?>> getInnerVersions(int idx, boolean mvcc) {
+        List<IOVersions<? extends BPlusInnerIO<?>>> ios = mvcc ? h2ExtraMvccInnerIOs : h2ExtraInnerIOs;
+
+        return ios.get(idx);
     }
 
     /**
      * @param idx Index.
      * @return IOVersions for given idx.
      */
-    public static IOVersions<? extends BPlusLeafIO<?>> getLeafVersions(int idx) {
-        return h2ExtraLeafIOs.get(idx);
+    public static IOVersions<? extends BPlusLeafIO<?>> getLeafVersions(int idx, boolean mvcc) {
+        List<IOVersions<? extends BPlusLeafIO<?>>> ios = mvcc ? h2ExtraMvccLeafIOs : h2ExtraLeafIOs;
+
+        return ios.get(idx);
     }
 
     /**
@@ -511,12 +537,17 @@ public abstract class PageIO {
      */
     @SuppressWarnings("unchecked")
     public static <Q extends BPlusIO<?>> Q getBPlusIO(int type, int ver) throws IgniteCheckedException {
-
         if (type >= T_H2_EX_REF_LEAF_START && type <= T_H2_EX_REF_LEAF_END)
             return (Q)h2ExtraLeafIOs.get(type - T_H2_EX_REF_LEAF_START).forVersion(ver);
 
         if (type >= T_H2_EX_REF_INNER_START && type <= T_H2_EX_REF_INNER_END)
             return (Q)h2ExtraInnerIOs.get(type - T_H2_EX_REF_INNER_START).forVersion(ver);
+
+        if (type >= T_H2_EX_REF_MVCC_LEAF_START && type <= T_H2_EX_REF_MVCC_LEAF_END)
+            return (Q)h2ExtraMvccLeafIOs.get(type - T_H2_EX_REF_MVCC_LEAF_START).forVersion(ver);
+
+        if (type >= T_H2_EX_REF_MVCC_INNER_START && type <= T_H2_EX_REF_MVCC_INNER_END)
+            return (Q)h2ExtraMvccInnerIOs.get(type - T_H2_EX_REF_MVCC_INNER_START).forVersion(ver);
 
         switch (type) {
             case T_H2_REF_INNER:

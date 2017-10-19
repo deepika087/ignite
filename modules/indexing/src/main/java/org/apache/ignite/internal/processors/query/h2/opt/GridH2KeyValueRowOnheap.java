@@ -98,7 +98,7 @@ public class GridH2KeyValueRowOnheap extends GridH2Row {
 
     /** {@inheritDoc} */
     @Override public long newMvccCounter() {
-        return newVer != null ? newVer.counter(): CacheCoordinatorsProcessor.COUNTER_NA;
+        return newVer != null ? newVer.counter(): CacheCoordinatorsProcessor.MVCC_COUNTER_NA;
     }
 
     /** {@inheritDoc} */

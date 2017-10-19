@@ -38,8 +38,8 @@ import static org.apache.ignite.cache.CacheWriteSynchronizationMode.FULL_SYNC;
 
 /**
  * TODO IGNITE-3478: text/spatial indexes with mvcc.
+ * TODO IGNITE-3478: indexingSpi with mvcc.
  * TODO IGNITE-3478: dynamic index create.
- * TODO IGNITE-3478: tests with/without inline.
  */
 @SuppressWarnings("unchecked")
 public class CacheMvccSqlQueriesTest extends CacheMvccAbstractTest {
@@ -49,7 +49,7 @@ public class CacheMvccSqlQueriesTest extends CacheMvccAbstractTest {
     public void testAccountsTxSql_SingleNode_SinglePartition() throws Exception {
         accountsTxReadAll(1, 0, 0, 1, new IgniteInClosure<CacheConfiguration>() {
             @Override public void apply(CacheConfiguration ccfg) {
-                ccfg.setIndexedTypes(Integer.class, MvccTestAccount.class).setSqlIndexMaxInlineSize(0);
+                ccfg.setIndexedTypes(Integer.class, MvccTestAccount.class);
             }
         }, false, ReadMode.SQL_ALL);
     }
@@ -60,7 +60,7 @@ public class CacheMvccSqlQueriesTest extends CacheMvccAbstractTest {
     public void testAccountsTxSql_WithRemoves_SingleNode_SinglePartition() throws Exception {
         accountsTxReadAll(1, 0, 0, 1, new IgniteInClosure<CacheConfiguration>() {
             @Override public void apply(CacheConfiguration ccfg) {
-                ccfg.setIndexedTypes(Integer.class, MvccTestAccount.class).setSqlIndexMaxInlineSize(0);
+                ccfg.setIndexedTypes(Integer.class, MvccTestAccount.class);
             }
         }, true, ReadMode.SQL_ALL);
     }
@@ -71,7 +71,7 @@ public class CacheMvccSqlQueriesTest extends CacheMvccAbstractTest {
     public void testAccountsTxSql_SingleNode() throws Exception {
         accountsTxReadAll(1, 0, 0, 64, new IgniteInClosure<CacheConfiguration>() {
             @Override public void apply(CacheConfiguration ccfg) {
-                ccfg.setIndexedTypes(Integer.class, MvccTestAccount.class).setSqlIndexMaxInlineSize(0);
+                ccfg.setIndexedTypes(Integer.class, MvccTestAccount.class);
             }
         }, false, ReadMode.SQL_ALL);
     }
@@ -82,7 +82,7 @@ public class CacheMvccSqlQueriesTest extends CacheMvccAbstractTest {
     public void testAccountsTxSql_WithRemoves_SingleNode() throws Exception {
         accountsTxReadAll(1, 0, 0, 64, new IgniteInClosure<CacheConfiguration>() {
             @Override public void apply(CacheConfiguration ccfg) {
-                ccfg.setIndexedTypes(Integer.class, MvccTestAccount.class).setSqlIndexMaxInlineSize(0);
+                ccfg.setIndexedTypes(Integer.class, MvccTestAccount.class);
             }
         }, true, ReadMode.SQL_ALL);
     }
@@ -91,12 +91,28 @@ public class CacheMvccSqlQueriesTest extends CacheMvccAbstractTest {
      * @throws Exception If failed.
      */
     public void testSqlSimple() throws Exception {
-        Ignite srv0 = startGrid(0);
+        startGrid(0);
+
+        for (int i = 0; i < 4; i++)
+            sqlSimple(i * 512);
+
+        ThreadLocalRandom rnd = ThreadLocalRandom.current();
+
+        for (int i = 0; i < 5; i++)
+            sqlSimple(rnd.nextInt(2048));
+    }
+
+    /**
+     * @param inlineSize Inline size.
+     * @throws Exception If failed.
+     */
+    private void sqlSimple(int inlineSize) throws Exception {
+        Ignite srv0 = ignite(0);
 
         IgniteCache<Integer, MvccTestSqlIndexValue> cache =  (IgniteCache)srv0.createCache(
             cacheConfiguration(PARTITIONED, FULL_SYNC, 0, DFLT_PARTITION_COUNT).
                 setIndexedTypes(Integer.class, MvccTestSqlIndexValue.class).
-                setSqlIndexMaxInlineSize(0));
+                setSqlIndexMaxInlineSize(inlineSize));
 
         Map<Integer, Integer> expVals = new HashMap<>();
 
@@ -134,18 +150,35 @@ public class CacheMvccSqlQueriesTest extends CacheMvccAbstractTest {
         checkValues(expVals, cache);
 
         checkActiveQueriesCleanup(srv0);
+
+        srv0.destroyCache(cache.getName());
     }
 
     /**
      * @throws Exception If failed.
      */
     public void testSqlSimplePutRemoveRandom() throws Exception {
-        Ignite srv0 = startGrid(0);
+        startGrid(0);
+
+        testSqlSimplePutRemoveRandom(0);
+
+        ThreadLocalRandom rnd = ThreadLocalRandom.current();
+
+        for (int i = 0; i < 3; i++)
+            testSqlSimplePutRemoveRandom(rnd.nextInt(2048));
+    }
+
+    /**
+     * @param inlineSize Inline size.
+     * @throws Exception If failed.
+     */
+    private void testSqlSimplePutRemoveRandom(int inlineSize) throws Exception {
+        Ignite srv0 = grid(0);
 
         IgniteCache<Integer, MvccTestSqlIndexValue> cache = (IgniteCache) srv0.createCache(
             cacheConfiguration(PARTITIONED, FULL_SYNC, 0, DFLT_PARTITION_COUNT).
                 setIndexedTypes(Integer.class, MvccTestSqlIndexValue.class).
-                setSqlIndexMaxInlineSize(0));
+                setSqlIndexMaxInlineSize(inlineSize));
 
         Map<Integer, Integer> expVals = new HashMap<>();
 
@@ -154,7 +187,7 @@ public class CacheMvccSqlQueriesTest extends CacheMvccAbstractTest {
 
         ThreadLocalRandom rnd = ThreadLocalRandom.current();
 
-        long stopTime = System.currentTimeMillis() + 10_000;
+        long stopTime = System.currentTimeMillis() + 5_000;
 
         for (int i = 0; i < 100_000; i++) {
             Integer key = rnd.nextInt(KEYS);
@@ -187,6 +220,8 @@ public class CacheMvccSqlQueriesTest extends CacheMvccAbstractTest {
         }
 
         checkActiveQueriesCleanup(srv0);
+
+        srv0.destroyCache(cache.getName());
     }
 
     /**
@@ -210,6 +245,12 @@ public class CacheMvccSqlQueriesTest extends CacheMvccAbstractTest {
      * @param cache Cache.
      */
     private void checkValues(Map<Integer, Integer> expVals, IgniteCache<Integer, MvccTestSqlIndexValue> cache) {
+        SqlFieldsQuery cntQry = new SqlFieldsQuery("select count(*) from MvccTestSqlIndexValue");
+
+        Long cnt = (Long)cache.query(cntQry).getAll().get(0).get(0);
+
+        assertEquals((long)expVals.size(), (Object)cnt);
+
         SqlQuery<Integer, MvccTestSqlIndexValue> qry;
 
         qry = new SqlQuery<>(MvccTestSqlIndexValue.class, "true");

@@ -109,6 +109,6 @@ public abstract class GridH2SearchRowAdapter implements GridH2SearchRow {
 
     /** {@inheritDoc} */
     @Override public long mvccCounter() {
-        return CacheCoordinatorsProcessor.COUNTER_NA;
+        return CacheCoordinatorsProcessor.MVCC_COUNTER_NA;
     }
 }
