@@ -139,8 +139,12 @@ public class GridH2Table extends TableBase {
             int affKeyColId = -1;
 
             if (affKey != null) {
-                if (doesColumnExist(affKey))
+                if (doesColumnExist(affKey)) {
                     affKeyColId = getColumn(affKey).getColumnId();
+
+                    if (desc.isKeyColumn(affKeyColId))
+                        affKeyColId = KEY_COL;
+                }
                 else
                     affinityColExists = false;
             }
@@ -219,6 +223,13 @@ public class GridH2Table extends TableBase {
      */
     public String cacheName() {
         return cctx.name();
+    }
+
+    /**
+     * @return Cache ID.
+     */
+    public int cacheId() {
+        return cctx.cacheId();
     }
 
     /**
@@ -447,7 +458,6 @@ public class GridH2Table extends TableBase {
     @SuppressWarnings("LockAcquiredButNotSafelyReleased")
     private boolean doUpdate(final GridH2Row row, boolean del) throws IgniteCheckedException {
         assert !cctx.mvccEnabled() || row.mvccCounter() != CacheCoordinatorsProcessor.COUNTER_NA : row;
-
         // Here we assume that each key can't be updated concurrently and case when different indexes
         // getting updated from different threads with different rows with the same key is impossible.
         lock(false);
