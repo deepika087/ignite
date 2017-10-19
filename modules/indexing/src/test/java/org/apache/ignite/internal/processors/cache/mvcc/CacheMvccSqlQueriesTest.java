@@ -18,11 +18,14 @@
 package org.apache.ignite.internal.processors.cache.mvcc;
 
 import java.io.Serializable;
+import java.util.ArrayList;
 import java.util.HashMap;
 import java.util.HashSet;
+import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.Map;
 import java.util.Set;
+import java.util.TreeMap;
 import java.util.concurrent.ThreadLocalRandom;
 import java.util.concurrent.atomic.AtomicBoolean;
 import javax.cache.processor.MutableEntry;
@@ -71,6 +74,13 @@ public class CacheMvccSqlQueriesTest extends CacheMvccAbstractTest {
     /**
      * @throws Exception If failed.
      */
+    public void testAccountsTxSumSql_SingleNode() throws Exception {
+        accountsTxReadAll(1, 0, 0, 64, new InitIndexing(Integer.class, MvccTestAccount.class), false, ReadMode.SQL_SUM);
+    }
+
+    /**
+     * @throws Exception If failed.
+     */
     public void testAccountsTxSql_WithRemoves_SingleNode() throws Exception {
         accountsTxReadAll(1, 0, 0, 64, new InitIndexing(Integer.class, MvccTestAccount.class), true, ReadMode.SQL_ALL);
     }
@@ -78,7 +88,29 @@ public class CacheMvccSqlQueriesTest extends CacheMvccAbstractTest {
     /**
      * @throws Exception If failed.
      */
-    public void testUpdateSingleValue() throws Exception {
+    public void testAccountsTxSql_ClientServer_Backups2() throws Exception {
+        accountsTxReadAll(4, 2, 2, 64, new InitIndexing(Integer.class, MvccTestAccount.class), false, ReadMode.SQL_ALL);
+    }
+
+    /**
+     * @throws Exception If failed.
+     */
+    public void testUpdateSingleValue_SingleNode() throws Exception {
+        updateSingleValue(true);
+    }
+
+    /**
+     * @throws Exception If failed.
+     */
+    public void testUpdateSingleValue_ClientServer() throws Exception {
+        updateSingleValue(false);
+    }
+
+    /**
+     * @param singleNode {@code True} for test with single node.
+     * @throws Exception If failed.
+     */
+    private void updateSingleValue(boolean singleNode) throws Exception {
         final int VALS = 100;
 
         final int writers = 4;
@@ -99,42 +131,380 @@ public class CacheMvccSqlQueriesTest extends CacheMvccAbstractTest {
         };
 
         GridInClosure3<Integer, List<TestCache>, AtomicBoolean> writer =
+            new GridInClosure3<Integer, List<TestCache>, AtomicBoolean>() {
+                @Override public void apply(Integer idx, List<TestCache> caches, AtomicBoolean stop) {
+                    ThreadLocalRandom rnd = ThreadLocalRandom.current();
+
+                    int cnt = 0;
+
+                    while (!stop.get()) {
+                        TestCache<Integer, MvccTestSqlIndexValue> cache = randomCache(caches, rnd);
+
+                        try {
+                            Integer key = rnd.nextInt(VALS);
+
+                            cache.cache.invoke(key, new CacheEntryProcessor<Integer, MvccTestSqlIndexValue, Object>() {
+                                @Override public Object process(MutableEntry<Integer, MvccTestSqlIndexValue> e, Object... args) {
+                                    Integer key = e.getKey();
+
+                                    MvccTestSqlIndexValue val = e.getValue();
+
+                                    int newIdxVal;
+
+                                    if (val.idxVal1 < INC_BY) {
+                                        assertEquals(key.intValue(), val.idxVal1);
+
+                                        newIdxVal = val.idxVal1 + INC_BY;
+                                    }
+                                    else {
+                                        assertEquals(INC_BY + key, val.idxVal1);
+
+                                        newIdxVal = key;
+                                    }
+
+                                    e.setValue(new MvccTestSqlIndexValue(newIdxVal));
+
+                                    return null;
+                                }
+                            });
+                        }
+                        finally {
+                            cache.readUnlock();
+                        }
+                    }
+
+                    info("Writer finished, updates: " + cnt);
+                }
+            };
+
+        GridInClosure3<Integer, List<TestCache>, AtomicBoolean> reader =
+            new GridInClosure3<Integer, List<TestCache>, AtomicBoolean>() {
+                @Override public void apply(Integer idx, List<TestCache> caches, AtomicBoolean stop) {
+                    ThreadLocalRandom rnd = ThreadLocalRandom.current();
+
+                    SqlFieldsQuery[] qrys = new SqlFieldsQuery[3];
+
+                    qrys[0] = new SqlFieldsQuery(
+                            "select _key, idxVal1 from MvccTestSqlIndexValue where idxVal1=?");
+
+                    qrys[1] = new SqlFieldsQuery(
+                            "select _key, idxVal1 from MvccTestSqlIndexValue where idxVal1=? or idxVal1=?");
+
+                    qrys[2] = new SqlFieldsQuery(
+                            "select _key, idxVal1 from MvccTestSqlIndexValue where _key=?");
+
+                    while (!stop.get()) {
+                        Integer key = rnd.nextInt(VALS);
+
+                        int qryIdx = rnd.nextInt(3);
+
+                        TestCache<Integer, MvccTestSqlIndexValue> cache = randomCache(caches, rnd);
+
+                        List<List<?>> res;
+
+                        try {
+                            SqlFieldsQuery qry = qrys[qryIdx];
+
+                            if (qryIdx == 1)
+                                qry.setArgs(key, key + INC_BY);
+                            else
+                                qry.setArgs(key);
+
+                            res = cache.cache.query(qry).getAll();
+                        }
+                        finally {
+                            cache.readUnlock();
+                        }
+
+                        assertTrue(qryIdx == 0 || !res.isEmpty());
+
+                        if (!res.isEmpty()) {
+                            assertEquals(1, res.size());
+
+                            List<?> resVals = res.get(0);
+
+                            Integer key0 = (Integer)resVals.get(0);
+                            Integer val0 = (Integer)resVals.get(1);
+
+                            assertEquals(key, key0);
+                            assertTrue(val0.equals(key) || val0.equals(key + INC_BY));
+                        }
+                    }
+
+                    if (idx == 0) {
+                        SqlFieldsQuery qry = new SqlFieldsQuery("select _key, idxVal1 from MvccTestSqlIndexValue");
+
+                        TestCache<Integer, MvccTestSqlIndexValue> cache = randomCache(caches, rnd);
+
+                        List<List<?>> res;
+
+                        try {
+                            res = cache.cache.query(qry).getAll();
+                        }
+                        finally {
+                            cache.readUnlock();
+                        }
+
+                        assertEquals(VALS, res.size());
+
+                        for (List<?> vals : res)
+                            info("Value: " + vals);
+                    }
+                }
+            };
+
+        int srvs;
+        int clients;
+
+        if (singleNode) {
+            srvs = 1;
+            clients = 0;
+        }
+        else {
+            srvs = 4;
+            clients = 2;
+        }
+
+        readWriteTest(
+            null,
+            srvs,
+            clients,
+            0,
+            DFLT_PARTITION_COUNT,
+            writers,
+            readers,
+            DFLT_TEST_TIME,
+            new InitIndexing(Integer.class, MvccTestSqlIndexValue.class),
+            init,
+            writer,
+            reader);
+    }
+
+    /**
+     * @throws Exception If failed.
+     */
+    public void testCountTransactional_SingleNode() throws Exception {
+      countTransactional(true);
+    }
+
+    /**
+     * @throws Exception If failed.
+     */
+    public void testCountTransactional_ClientServer() throws Exception {
+        countTransactional(false);
+    }
+
+    /**
+     * @param singleNode {@code True} for test with single node.
+     * @throws Exception If failed.
+     */
+    private void countTransactional(boolean singleNode) throws Exception {
+        final int writers = 4;
+
+        final int readers = 4;
+
+        final int THREAD_KEY_RANGE = 100;
+
+        final int VAL_RANGE = 10;
+
+        GridInClosure3<Integer, List<TestCache>, AtomicBoolean> writer =
+            new GridInClosure3<Integer, List<TestCache>, AtomicBoolean>() {
+                @Override public void apply(Integer idx, List<TestCache> caches, AtomicBoolean stop) {
+                    ThreadLocalRandom rnd = ThreadLocalRandom.current();
+
+                    int min = idx * THREAD_KEY_RANGE;
+                    int max = min + THREAD_KEY_RANGE;
+
+                    info("Thread range [min=" + min + ", max=" + max + ']');
+
+                    int cnt = 0;
+
+                    Set<Integer> keys = new LinkedHashSet<>();
+
+                    while (!stop.get()) {
+                        TestCache<Integer, MvccTestSqlIndexValue> cache = randomCache(caches, rnd);
+
+                        try {
+                            // Add or remove 10 keys.
+                            if (!keys.isEmpty() && (keys.size() == THREAD_KEY_RANGE || rnd.nextInt(3) == 0 )) {
+                                Set<Integer> rmvKeys = new HashSet<>();
+
+                                for (Integer key : keys) {
+                                    rmvKeys.add(key);
+
+                                    if (rmvKeys.size() == 10)
+                                        break;
+                                }
+
+                                assertEquals(10, rmvKeys.size());
+
+                                cache.cache.removeAll(rmvKeys);
+
+                                keys.removeAll(rmvKeys);
+                            }
+                            else {
+                                TreeMap<Integer, MvccTestSqlIndexValue> map = new TreeMap<>();
+
+                                while (map.size() != 10) {
+                                    Integer key = rnd.nextInt(min, max);
+
+                                    if (keys.add(key))
+                                        map.put(key, new MvccTestSqlIndexValue(rnd.nextInt(VAL_RANGE)));
+                                }
+
+                                assertEquals(10, map.size());
+
+                                cache.cache.putAll(map);
+                            }
+                        }
+                        finally {
+                            cache.readUnlock();
+                        }
+                    }
+
+                    info("Writer finished, updates: " + cnt);
+                }
+            };
+
+        GridInClosure3<Integer, List<TestCache>, AtomicBoolean> reader =
+            new GridInClosure3<Integer, List<TestCache>, AtomicBoolean>() {
+                @Override public void apply(Integer idx, List<TestCache> caches, AtomicBoolean stop) {
+                    ThreadLocalRandom rnd = ThreadLocalRandom.current();
+
+                    List<SqlFieldsQuery> qrys = new ArrayList<>();
+
+                    qrys.add(new SqlFieldsQuery("select count(*) from MvccTestSqlIndexValue"));
+
+                    qrys.add(new SqlFieldsQuery(
+                        "select count(*) from MvccTestSqlIndexValue where idxVal1 >= 0 and idxVal1 <= " + VAL_RANGE));
+
+                    while (!stop.get()) {
+                        TestCache<Integer, MvccTestSqlIndexValue> cache = randomCache(caches, rnd);
+
+                        try {
+                            for (SqlFieldsQuery qry : qrys) {
+                                List<List<?>> res = cache.cache.query(qry).getAll();
+
+                                assertEquals(1, res.size());
+
+                                Long cnt = (Long)res.get(0).get(0);
+
+                                assertTrue(cnt % 10 == 0);
+                            }
+                        }
+                        finally {
+                            cache.readUnlock();
+                        }
+                    }
+                }
+            };
+
+        int srvs;
+        int clients;
+
+        if (singleNode) {
+            srvs = 1;
+            clients = 0;
+        }
+        else {
+            srvs = 4;
+            clients = 2;
+        }
+
+        readWriteTest(
+            null,
+            srvs,
+            clients,
+            0,
+            DFLT_PARTITION_COUNT,
+            writers,
+            readers,
+            DFLT_TEST_TIME,
+            new InitIndexing(Integer.class, MvccTestSqlIndexValue.class),
+            null,
+            writer,
+            reader);
+    }
+
+    /**
+     * @throws Exception If failed.
+     */
+    public void testMaxTransactional_SingleNode() throws Exception {
+        maxMinTransactional(true);
+    }
+
+    /**
+     * @throws Exception If failed.
+     */
+    public void testMaxTransactional_ClientServer() throws Exception {
+        maxMinTransactional(false);
+    }
+
+    /**
+     * @param singleNode {@code True} for test with single node.
+     * @throws Exception If failed.
+     */
+    private void maxMinTransactional(boolean singleNode) throws Exception {
+        final int writers = 1;
+
+        final int readers = 1;
+
+        final int THREAD_OPS = 10;
+
+        final int OP_RANGE = 10;
+
+        final int THREAD_KEY_RANGE = OP_RANGE * THREAD_OPS;
+
+        GridInClosure3<Integer, List<TestCache>, AtomicBoolean> writer =
                 new GridInClosure3<Integer, List<TestCache>, AtomicBoolean>() {
                     @Override public void apply(Integer idx, List<TestCache> caches, AtomicBoolean stop) {
                         ThreadLocalRandom rnd = ThreadLocalRandom.current();
 
+                        int min = idx * THREAD_KEY_RANGE;
+
+                        info("Thread range [start=" + min + ']');
+
                         int cnt = 0;
+
+                        boolean add = true;
+
+                        int op = 0;
 
                         while (!stop.get()) {
                             TestCache<Integer, MvccTestSqlIndexValue> cache = randomCache(caches, rnd);
 
                             try {
-                                Integer key = rnd.nextInt(VALS);
+                                int startKey = min + op * OP_RANGE;
 
-                                cache.cache.invoke(key, new CacheEntryProcessor<Integer, MvccTestSqlIndexValue, Object>() {
-                                    @Override public Object process(MutableEntry<Integer, MvccTestSqlIndexValue> e, Object... args) {
-                                        Integer key = e.getKey();
+                                if (add) {
+                                    Map<Integer, MvccTestSqlIndexValue> vals = new HashMap<>();
 
-                                        MvccTestSqlIndexValue val = e.getValue();
+                                    for (int i = 0; i < 10; i++) {
+                                        Integer key = startKey + i + 1;
 
-                                        int newIdxVal;
-
-                                        if (val.idxVal1 < INC_BY) {
-                                            assertEquals(key.intValue(), val.idxVal1);
-
-                                            newIdxVal = val.idxVal1 + INC_BY;
-                                        }
-                                        else {
-                                            assertEquals(INC_BY + key, val.idxVal1);
-
-                                            newIdxVal = key;
-                                        }
-
-                                        e.setValue(new MvccTestSqlIndexValue(newIdxVal));
-
-                                        return null;
+                                        vals.put(key, new MvccTestSqlIndexValue(key));
                                     }
-                                });
+
+                                    cache.cache.putAll(vals);
+
+                                    info("put " + vals.keySet());
+                                }
+                                else {
+                                    Set<Integer> rmvKeys = new HashSet<>();
+
+                                    for (int i = 0; i < 10; i++)
+                                        rmvKeys.add(startKey + i + 1);
+
+                                    cache.cache.removeAll(rmvKeys);
+
+                                    info("remove " + rmvKeys);
+                                }
+
+                                if (++op == THREAD_OPS) {
+                                    add = !add;
+
+                                    op = 0;
+                                }
                             }
                             finally {
                                 cache.readUnlock();
@@ -150,90 +520,112 @@ public class CacheMvccSqlQueriesTest extends CacheMvccAbstractTest {
                     @Override public void apply(Integer idx, List<TestCache> caches, AtomicBoolean stop) {
                         ThreadLocalRandom rnd = ThreadLocalRandom.current();
 
-                        SqlFieldsQuery[] qrys = new SqlFieldsQuery[3];
+                        List<SqlFieldsQuery> qrys = new ArrayList<>();
 
-                        qrys[0] = new SqlFieldsQuery(
-                                "select _key, idxVal1 from MvccTestSqlIndexValue where idxVal1=?");
+                        qrys.add(new SqlFieldsQuery("select max(idxVal1) from MvccTestSqlIndexValue"));
 
-                        qrys[1] = new SqlFieldsQuery(
-                                "select _key, idxVal1 from MvccTestSqlIndexValue where idxVal1=? or idxVal1=?");
-
-                        qrys[2] = new SqlFieldsQuery(
-                                "select _key, idxVal1 from MvccTestSqlIndexValue where _key=?");
+                        qrys.add(new SqlFieldsQuery("select min(idxVal1) from MvccTestSqlIndexValue"));
 
                         while (!stop.get()) {
-                            Integer key = rnd.nextInt(VALS);
-
-                            int qryIdx = rnd.nextInt(3);
-
                             TestCache<Integer, MvccTestSqlIndexValue> cache = randomCache(caches, rnd);
 
-                            List<List<?>> res;
-
                             try {
-                                SqlFieldsQuery qry = qrys[qryIdx];
+                                for (SqlFieldsQuery qry : qrys) {
+                                    List<List<?>> res = cache.cache.query(qry).getAll();
 
-                                if (qryIdx == 1)
-                                    qry.setArgs(key, key + INC_BY);
-                                else
-                                    qry.setArgs(key);
+                                    assertEquals(1, res.size());
 
-                                res = cache.cache.query(qry).getAll();
+                                    Integer m = (Integer)res.get(0).get(0);
+
+                                    assertTrue(m == null || m % 10 == 0);
+                                }
                             }
                             finally {
                                 cache.readUnlock();
                             }
-
-                            assertTrue(qryIdx == 0 || !res.isEmpty());
-
-                            if (!res.isEmpty()) {
-                                assertEquals(1, res.size());
-
-                                List<?> resVals = res.get(0);
-
-                                Integer key0 = (Integer)resVals.get(0);
-                                Integer val0 = (Integer)resVals.get(1);
-
-                                assertEquals(key, key0);
-                                assertTrue(val0.equals(key) || val0.equals(key + INC_BY));
-                            }
-                        }
-
-                        if (idx == 0) {
-                            SqlFieldsQuery qry = new SqlFieldsQuery("select _key, idxVal1 from MvccTestSqlIndexValue");
-
-                            TestCache<Integer, MvccTestSqlIndexValue> cache = randomCache(caches, rnd);
-
-                            List<List<?>> res;
-
-                            try {
-                                res = cache.cache.query(qry).getAll();
-                            }
-                            finally {
-                                cache.readUnlock();
-                            }
-
-                            assertEquals(VALS, res.size());
-
-                            for (List<?> vals : res)
-                                info("Value: " + vals);
                         }
                     }
                 };
 
+        int srvs;
+        int clients;
+
+        if (singleNode) {
+            srvs = 1;
+            clients = 0;
+        }
+        else {
+            srvs = 4;
+            clients = 2;
+        }
+
         readWriteTest(
             null,
-            1,
+            srvs,
+            clients,
             0,
-            0,
-            32,
+            DFLT_PARTITION_COUNT,
             writers,
             readers,
             DFLT_TEST_TIME,
             new InitIndexing(Integer.class, MvccTestSqlIndexValue.class),
-            init,
+            null,
             writer,
             reader);
+    }
+
+    /**
+     * @throws Exception If failed.
+     */
+    public void testSqlQueriesWithMvcc() throws Exception {
+        Ignite srv0 = startGrid(0);
+
+        IgniteCache<Integer, MvccTestSqlIndexValue> cache =  (IgniteCache)srv0.createCache(
+            cacheConfiguration(PARTITIONED, FULL_SYNC, 0, DFLT_PARTITION_COUNT).
+                setIndexedTypes(Integer.class, MvccTestSqlIndexValue.class));
+
+        for (int i = 0; i < 10; i++)
+            cache.put(i, new MvccTestSqlIndexValue(i));
+
+        {
+            SqlFieldsQuery qry = new SqlFieldsQuery("select max(idxVal1) from MvccTestSqlIndexValue");
+
+            cache.query(qry).getAll();
+        }
+
+        {
+            SqlFieldsQuery qry = new SqlFieldsQuery("select min(idxVal1) from MvccTestSqlIndexValue");
+
+            cache.query(qry).getAll();
+        }
+
+        {
+
+            SqlFieldsQuery qry = new SqlFieldsQuery("select count(*) from MvccTestSqlIndexValue");
+
+            cache.query(qry).getAll();
+        }
+
+        {
+
+            SqlFieldsQuery qry = new SqlFieldsQuery("select count(*) from MvccTestSqlIndexValue where idxVal1=5");
+
+            cache.query(qry).getAll();
+        }
+
+        {
+
+            SqlFieldsQuery qry = new SqlFieldsQuery("select count(*) from MvccTestSqlIndexValue where idxVal1 >= 0 and idxVal1 < 5");
+
+            cache.query(qry).getAll();
+        }
+
+        {
+
+            SqlFieldsQuery qry = new SqlFieldsQuery("select sum(idxVal1) from MvccTestSqlIndexValue");
+
+            cache.query(qry).getAll();
+        }
     }
 
     /**

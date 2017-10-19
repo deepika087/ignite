@@ -17,6 +17,7 @@
 
 package org.apache.ignite.internal.processors.cache.mvcc;
 
+import java.math.BigDecimal;
 import java.util.ArrayList;
 import java.util.Collection;
 import java.util.HashMap;
@@ -332,13 +333,15 @@ public abstract class CacheMvccAbstractTest extends GridCommonAbstractTest {
 
                     Map<Integer, Integer> lastUpdateCntrs = new HashMap<>();
 
+                    SqlFieldsQuery sumQry = new SqlFieldsQuery("select sum(val) from MvccTestAccount");
+
                     while (!stop.get()) {
                         while (keys.size() < ACCOUNTS)
                             keys.add(rnd.nextInt(ACCOUNTS));
 
                         TestCache<Integer, MvccTestAccount> cache = randomCache(caches, rnd);
 
-                        Map<Integer, MvccTestAccount> accounts;
+                        Map<Integer, MvccTestAccount> accounts = null;
 
                         try {
                             switch (readMode) {
@@ -389,6 +392,18 @@ public abstract class CacheMvccAbstractTest extends GridCommonAbstractTest {
                                     break;
                                 }
 
+                                case SQL_SUM: {
+                                    List<List<?>> res = cache.cache.query(sumQry).getAll();
+
+                                    assertEquals(1, res.size());
+
+                                    BigDecimal sum = (BigDecimal)res.get(0).get(0);
+
+                                    assertEquals(ACCOUNT_START_VAL * ACCOUNTS, sum.intValue());
+
+                                    break;
+                                }
+
                                 default: {
                                     fail();
 
@@ -400,29 +415,31 @@ public abstract class CacheMvccAbstractTest extends GridCommonAbstractTest {
                             cache.readUnlock();
                         }
 
-                        if (!withRmvs)
-                            assertEquals(ACCOUNTS, accounts.size());
+                        if (accounts != null) {
+                            if (!withRmvs)
+                                assertEquals(ACCOUNTS, accounts.size());
 
-                        int sum = 0;
+                            int sum = 0;
 
-                        for (int i = 0; i < ACCOUNTS; i++) {
-                            MvccTestAccount account = accounts.get(i);
+                            for (int i = 0; i < ACCOUNTS; i++) {
+                                MvccTestAccount account = accounts.get(i);
 
-                            if (account != null) {
-                                sum += account.val;
+                                if (account != null) {
+                                    sum += account.val;
 
-                                Integer cntr = lastUpdateCntrs.get(i);
+                                    Integer cntr = lastUpdateCntrs.get(i);
 
-                                if (cntr != null)
-                                    assertTrue(cntr <= account.updateCnt);
+                                    if (cntr != null)
+                                        assertTrue(cntr <= account.updateCnt);
 
-                                lastUpdateCntrs.put(i, cntr);
+                                    lastUpdateCntrs.put(i, cntr);
+                                }
+                                else
+                                    assertTrue(withRmvs);
                             }
-                            else
-                                assertTrue(withRmvs);
-                        }
 
-                        assertEquals(ACCOUNTS * ACCOUNT_START_VAL, sum);
+                            assertEquals(ACCOUNTS * ACCOUNT_START_VAL, sum);
+                        }
                     }
 
                     if (idx == 0) {
@@ -827,7 +844,10 @@ public abstract class CacheMvccAbstractTest extends GridCommonAbstractTest {
         SCAN,
 
         /** */
-        SQL_ALL
+        SQL_ALL,
+
+        /** */
+        SQL_SUM
     }
 
     /**

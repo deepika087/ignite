@@ -321,6 +321,18 @@ public class H2TreeIndex extends GridH2IndexBase {
 
             H2Tree tree = treeForRead(seg);
 
+            if (cctx.mvccEnabled()) {
+                GridH2QueryContext qctx = GridH2QueryContext.get();
+
+                assert qctx != null;
+
+                H2TreeMvccFilterClosure mvccFilter = qctx.mvccFilter();
+
+                assert mvccFilter != null;
+
+                // TODO IGNITE-3478
+            }
+
             GridH2Row row = b ? tree.findFirst(): tree.findLast();
 
             return new SingleRowCursor(row);
